@@ -28,9 +28,21 @@ from JupyROOT import handlers
 #Notebook-trimming imports
 import json
 import webbrowser
-i = 0;
+i = 0
 import time
 import threading
+
+#Twisted server
+import getopt
+import string
+import sys
+from twisted.internet import protocol
+from twisted.internet import reactor
+
+
+
+num_browsers_open = 0
+thttp_server_processes = []
 
 # We want iPython to take over the graphics
 ROOT.gROOT.SetBatch()
@@ -102,17 +114,44 @@ def disableJSVisDebug():
     _enableJSVis = False
     _enableJSVisDebug = False
     
-def processEventLoopServer():
-    thttp_server = ROOT.THttpServer("http:8088?top=ROOT;readwrite")
+
+def setup_proxy(server_port):
+    sourcePort = 8080 #/rootA,rootB etc
+    targetHost = "127.0.0.1"
+    targetPort = server_port
+    reactor.listenTCP(sourcePort, HttpServerFactory(targetHost, int(targetPort)))
+    reactor.run()
+    
+def start_thttp_server():
+    global num_browsers_open
+    
+    if (num_browsers_open<10):
+      thttp_server = ROOT.THttpServer("http:808{}?top=ROOT;readwrite".format(str(num_browsers_open+1)))
+      #thttp_server.CreateEngine("fastcgi:9000")
+    
+      #ROOT.
+    
+    webbrowser.open("http://localhost:808{}/".format(str(num_browsers_open+1)),new=1)
+    
     while True:
       ROOT.gSystem.ProcessEvents()
       time.sleep(0.02)
-	  
+        
+	 
 def browse():
-    webbrowser.open("http://localhost:8088",new=1)
-    thread = threading.Thread(target = processEventLoopServer)
-    thread.daemon = True;
-    thread.start()
+    global num_browsers_open
+    global thttp_server_processes
+       
+    thttp_server_processes.append(threading.Thread(target = start_thttp_server))
+    thttp_server_processes[-1].daemon = True;
+    thttp_server_processes[-1].start()
+    
+    num_browsers_open+=1
+
+    
+    for i in range(0,num_browsers_open+1):
+	setup_proxy(8080+num_browsers_open)
+    
 
 def _getPlatform():
     return sys.platform
@@ -344,6 +383,60 @@ def DrawCanvases():
 def NotebookDraw():
     DrawGeometry()
     DrawCanvases()
+    
+    #START OF TWISTED PROXY
+    
+class ConsoleWriter():
+
+  def write(self, data, type):
+    if (not data):
+      sys.stdout.write("No response from server\n")
+
+
+class HttpClientProtocol(protocol.Protocol):
+
+  def __init__(self, serverTransport):
+    self.serverTransport = serverTransport
+
+  def sendMessage(self, data):
+    self.transport.write(data)
+  
+  def dataReceived(self, data):
+    self.data = data
+    ConsoleWriter().write(self.data, "response")
+    self.serverTransport.write(self.data)
+  
+  def connectionLost(self, reason):
+    self.serverTransport.loseConnection()
+    self.transport.loseConnection()
+
+
+class HttpServerProtocol(protocol.Protocol):
+
+  def dataReceived(self, data):
+    self.data = data
+    ConsoleWriter().write(self.data, "request")
+    client = protocol.ClientCreator(reactor, HttpClientProtocol, self.transport)
+    if (str(self.factory.targetPort) == "443"):
+      d = client.connectSSL(self.factory.targetHost, self.factory.targetPort,ssl.DefaultOpenSSLContextFactory('server.key', 'server.crt'))
+      d.addCallback(self.forwardToClient, client)
+    else:
+      d = client.connectTCP(self.factory.targetHost, self.factory.targetPort)
+      d.addCallback(self.forwardToClient, client)
+
+  def forwardToClient(self, client, data):
+    client.sendMessage(self.data)
+
+
+class HttpServerFactory(protocol.ServerFactory):
+
+  protocol = HttpServerProtocol
+
+  def __init__(self, targetHost, targetPort):
+    self.targetHost = targetHost
+    self.targetPort = targetPort
+    
+    #END OF TWISTED PROXY
 
 class CaptureDrawnPrimitives(object):
     '''
@@ -357,8 +450,6 @@ class CaptureDrawnPrimitives(object):
 
     def register(self):
         self.shell.events.register('post_execute', self._post_execute)
-        
-       	   
 
 class NotebookDrawer(object):
     '''
@@ -427,26 +518,26 @@ class NotebookDrawer(object):
 	{'_typename': 'TCanvas', 'fPrimitives': {'arr': [{'arr': [{'_typename': 'NotTColor'}], '_typename': 'NotObjArray', 'name': 'ListOfOthers'}]}}
 	"""
 	
+	if ROOT.TColor.DefinedColors():
+	    return object_json
+	
 	#Only TCanvas JSON objects have TColors to remove in the first place
 	if "_typename" in object_json and object_json["_typename"]!="TCanvas":
 	    return object_json
 
 	#TColor objects are known to have this fixed nested structure in the TCanvas as follows:
 	#TCanvas -> fPrimitives-> arr-> TObjArray (an element in arr)
-	if "fPrimitives" in object_json:
-	    fPrimitives_array = object_json["fPrimitives"]["arr"]
-	    for element in fPrimitives_array:
-		if element["_typename"] == "TObjArray" and element["name"] == "ListOfColors":
-		    element.clear()
+	if "fPrimitives" not in object_json:
+	    return object_json
+	  
+	fPrimitives_array = object_json["fPrimitives"]["arr"]
+	for element in fPrimitives_array:
+	    if element["_typename"] == "TObjArray" and element["name"] == "ListOfColors":
+		element.clear()
 
 
 	return object_json
       
-    
-      
-    
-    
-
     def _trimJSONForGraphics(self,object_json):
 	'''
 	Function that calls helper functions to trim redundant information in JSON graphics files to reduce size
@@ -459,7 +550,11 @@ class NotebookDrawer(object):
         # Workaround to have ConvertToJSON work
         
         #<class 'ROOT.TString'>
-        object_json = ROOT.TBufferJSON.ConvertToJSONGraphics(self.drawableObject,3)
+        object_json = ROOT.TBufferJSON.ConvertToJSON(self.drawableObject,3)
+        #<type 'dict'>
+        parsed_json = json.loads(str(object_json))
+        #<type 'dict'>
+        trimmed_json = self._trimJSONForGraphics(parsed_json)
 	  
         # Here we could optimise the string manipulation
         divId = 'root_plot_' + str(self._getUID())
@@ -476,7 +571,7 @@ class NotebookDrawer(object):
         thisJsCode = _jsCode.format(jsCanvasWidth = height,
                                     jsCanvasHeight = width,
                                     jsROOTSourceDir = _jsROOTSourceDir,
-                                    jsonContent = object_json.Data(),
+                                    jsonContent = json.dumps(trimmed_json),
                                     jsDrawOptions = options,
                                     jsDivId = divId)
         return thisJsCode
