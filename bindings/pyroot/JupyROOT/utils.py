@@ -40,7 +40,7 @@ from twisted.internet import protocol
 from twisted.internet import reactor
 
 
-
+tHttpServer = None
 num_browsers_open = 0
 thttp_server_processes = []
 
@@ -126,10 +126,13 @@ def start_thttp_server():
     global num_browsers_open
     
     if (num_browsers_open<10):
-      thttp_server = ROOT.THttpServer("http:808{}?top=ROOT;readwrite".format(str(num_browsers_open+1)))
+      
+      global tHttpServer
+      tHttpServer = ROOT.THttpServer("http:8080?top=ROOT;readwrite")
+      tHttpServer.AddLocation("rootA/", str(os.getcwd()))
+      #thttp_server = ROOT.THttpServer("http:808{}?top=ROOT;readwrite".format(str(num_browsers_open+1)))
       #thttp_server.CreateEngine("fastcgi:9000")
-    
-      #ROOT.
+      #thttp_server.AddLocation("rootA", str(os.getcwd()))
     
     webbrowser.open("http://localhost:808{}/".format(str(num_browsers_open+1)),new=1)
     
@@ -142,15 +145,15 @@ def browse():
     global num_browsers_open
     global thttp_server_processes
        
-    thttp_server_processes.append(threading.Thread(target = start_thttp_server))
-    thttp_server_processes[-1].daemon = True;
-    thttp_server_processes[-1].start()
+    #thttp_server_processes.append(threading.Thread(target = start_thttp_server))
+    #thttp_server_processes[-1].daemon = True;
+    #thttp_server_processes[-1].start()
     
-    num_browsers_open+=1
+    #num_browsers_open+=1
 
     
-    for i in range(0,num_browsers_open+1):
-	setup_proxy(8080+num_browsers_open)
+    #for i in range(0,num_browsers_open+1):
+	#setup_proxy(8080+num_browsers_open)
     
 
 def _getPlatform():
@@ -551,6 +554,18 @@ class NotebookDrawer(object):
         
         #<class 'ROOT.TString'>
         object_json = ROOT.TBufferJSON.ConvertToJSON(self.drawableObject,3)
+        
+        global tHttpServer
+	if tHttpServer == None:
+	  threading.Thread(target = start_thttp_server).start()
+	  
+	#f = open('drawableObject', 'w+')
+	#f.write(str(self.drawableObject))
+	#f.write(str(os.getcwd()))
+	tHttpServer.Register("rootA", self.drawableObject);
+	#f.close()
+        
+        
         #<type 'dict'>
         parsed_json = json.loads(str(object_json))
         #<type 'dict'>
